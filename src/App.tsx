@@ -14,7 +14,9 @@ const quickQuestions = [
   '¿Qué documentos necesito?',
 ]
 
-const geminiConfigured = Boolean((import.meta.env.VITE_GEMINI_API_KEY as string | undefined)?.trim())
+function getStatusLabel(status: 'online' | 'offline') {
+  return status === 'online' ? 'Gemini activa' : 'Modo local'
+}
 
 function getFallbackReply(question: string) {
   const normalizedQuestion = question.toLowerCase()
@@ -39,53 +41,21 @@ function getFallbackReply(question: string) {
 }
 
 async function getAIReply(conversation: Message[], latestQuestion: string) {
-  const apiKey = (import.meta.env.VITE_GEMINI_API_KEY as string | undefined)?.trim()
-
-  if (!apiKey) {
-    return getFallbackReply(latestQuestion)
-  }
-
-  const model = (import.meta.env.VITE_GEMINI_MODEL as string | undefined)?.trim() || 'gemini-3.8-flash'
-
-  const contents = [
-    ...conversation.slice(-8).map((message) => ({
-      role: message.from === 'user' ? 'user' : 'model',
-      parts: [{ text: message.text }],
-    })),
-    {
-      role: 'user',
-      parts: [{ text: latestQuestion }],
-    },
-  ]
-
-  const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`, {
+  const response = await fetch('/api/chat', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({
-      contents,
-      generationConfig: {
-        temperature: 0.7,
-        maxOutputTokens: 220,
-      },
-      systemInstruction: {
-        parts: [{
-          text: 'Eres un asistente virtual de SENATI. Responde en español, claro y amable. Ayudas a estudiantes sobre carreras, matrícula, requisitos, costos y fechas. No inventes información; cuando no sepas algo, sugiere contactar a un asesor.',
-        }],
-      },
-    }),
+    body: JSON.stringify({ latestQuestion, conversation }),
   })
 
   if (!response.ok) {
-    const errorText = await response.text()
-    throw new Error(errorText || 'La IA no respondió correctamente.')
+    const errorPayload = await response.json().catch(() => null)
+    throw new Error(errorPayload?.error || 'La IA no respondió correctamente.')
   }
 
   const data = await response.json()
-  const aiText = data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim()
-
-  return aiText || getFallbackReply(latestQuestion)
+  return data?.answer || getFallbackReply(latestQuestion)
 }
 
 function currentTime() {
@@ -109,6 +79,7 @@ function App() {
   ])
   const [input, setInput] = useState('')
   const [isThinking, setIsThinking] = useState(false)
+  const [aiStatus, setAiStatus] = useState<'online' | 'offline'>('offline')
 
   const sendMessage = async (text = input) => {
     const cleanText = text.trim()
@@ -128,6 +99,7 @@ function App() {
 
     try {
       const botReply = await getAIReply(updatedConversation, cleanText)
+      setAiStatus('online')
 
       setMessages((currentMessages) => [
         ...currentMessages,
@@ -138,14 +110,14 @@ function App() {
           time: currentTime(),
         },
       ])
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : 'No pude contactar la IA.'
+    } catch {
+      setAiStatus('offline')
       setMessages((currentMessages) => [
         ...currentMessages,
         {
           id: Date.now() + 1,
           from: 'bot',
-          text: `No pude conectar con la IA en este momento. ${getFallbackReply(cleanText)} Detalle: ${errorMessage}`,
+          text: `La IA está temporalmente ocupada. ${getFallbackReply(cleanText)}`,
           time: currentTime(),
         },
       ])
@@ -164,9 +136,9 @@ function App() {
             <p className="brand-name">Asistente de Admisión</p>
           </div>
         </div>
-        <div className={`status-pill ${geminiConfigured ? 'online' : 'offline'}`}>
+        <div className={`status-pill ${aiStatus === 'online' ? 'online' : 'offline'}`}>
           <span className="status-dot" />
-          {geminiConfigured ? 'Gemini activa' : 'Modo local'}
+          {getStatusLabel(aiStatus)}
         </div>
       </header>
 
