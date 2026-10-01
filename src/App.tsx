@@ -14,16 +14,16 @@ const quickQuestions = [
   '¿Qué documentos necesito?',
 ]
 
-const careerKeywords = ['carrera', 'carreras', 'estudiar', 'especialidad', 'programa']
+const geminiConfigured = Boolean((import.meta.env.VITE_GEMINI_API_KEY as string | undefined)?.trim())
 
-function getBotReply(question: string) {
+function getFallbackReply(question: string) {
   const normalizedQuestion = question.toLowerCase()
 
-  if (careerKeywords.some((keyword) => normalizedQuestion.includes(keyword))) {
+  if (normalizedQuestion.includes('carrera') || normalizedQuestion.includes('estudiar') || normalizedQuestion.includes('especialidad') || normalizedQuestion.includes('programa')) {
     return 'En SENATI puedes elegir entre Desarrollo de Software, Mecánica Automotriz, Administración Industrial, Electricidad Industrial y Diseño Gráfico Digital. ¿Cuál te interesa conocer?'
   }
 
-  if (normalizedQuestion.includes('costo') || normalizedQuestion.includes('precio') || normalizedQuestion.includes('matrícula')) {
+  if (normalizedQuestion.includes('costo') || normalizedQuestion.includes('precio') || normalizedQuestion.includes('matrícula') || normalizedQuestion.includes('matricula')) {
     return 'La matrícula referencial es de S/ 180. El costo puede variar según la carrera y sede. Te recomiendo confirmar el monto final con Admisión antes de realizar el pago.'
   }
 
@@ -36,6 +36,56 @@ function getBotReply(question: string) {
   }
 
   return 'Puedo orientarte sobre carreras, costos, requisitos y fechas de matrícula. Prueba con una de las preguntas rápidas o escribe tu consulta con tus propias palabras.'
+}
+
+async function getAIReply(conversation: Message[], latestQuestion: string) {
+  const apiKey = (import.meta.env.VITE_GEMINI_API_KEY as string | undefined)?.trim()
+
+  if (!apiKey) {
+    return getFallbackReply(latestQuestion)
+  }
+
+  const model = (import.meta.env.VITE_GEMINI_MODEL as string | undefined)?.trim() || 'gemini-3.8-flash'
+
+  const contents = [
+    ...conversation.slice(-8).map((message) => ({
+      role: message.from === 'user' ? 'user' : 'model',
+      parts: [{ text: message.text }],
+    })),
+    {
+      role: 'user',
+      parts: [{ text: latestQuestion }],
+    },
+  ]
+
+  const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      contents,
+      generationConfig: {
+        temperature: 0.7,
+        maxOutputTokens: 220,
+      },
+      systemInstruction: {
+        parts: [{
+          text: 'Eres un asistente virtual de SENATI. Responde en español, claro y amable. Ayudas a estudiantes sobre carreras, matrícula, requisitos, costos y fechas. No inventes información; cuando no sepas algo, sugiere contactar a un asesor.',
+        }],
+      },
+    }),
+  })
+
+  if (!response.ok) {
+    const errorText = await response.text()
+    throw new Error(errorText || 'La IA no respondió correctamente.')
+  }
+
+  const data = await response.json()
+  const aiText = data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim()
+
+  return aiText || getFallbackReply(latestQuestion)
 }
 
 function currentTime() {
@@ -60,25 +110,48 @@ function App() {
   const [input, setInput] = useState('')
   const [isThinking, setIsThinking] = useState(false)
 
-  const sendMessage = (text = input) => {
+  const sendMessage = async (text = input) => {
     const cleanText = text.trim()
     if (!cleanText || isThinking) return
 
-    const now = currentTime()
-    setMessages((currentMessages) => [
-      ...currentMessages,
-      { id: Date.now(), from: 'user', text: cleanText, time: now },
-    ])
+    const userMessage: Message = {
+      id: Date.now(),
+      from: 'user',
+      text: cleanText,
+      time: currentTime(),
+    }
+
+    const updatedConversation = [...messages, userMessage]
+    setMessages(updatedConversation)
     setInput('')
     setIsThinking(true)
 
-    window.setTimeout(() => {
+    try {
+      const botReply = await getAIReply(updatedConversation, cleanText)
+
       setMessages((currentMessages) => [
         ...currentMessages,
-        { id: Date.now() + 1, from: 'bot', text: getBotReply(cleanText), time: currentTime() },
+        {
+          id: Date.now() + 1,
+          from: 'bot',
+          text: botReply,
+          time: currentTime(),
+        },
       ])
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'No pude contactar la IA.'
+      setMessages((currentMessages) => [
+        ...currentMessages,
+        {
+          id: Date.now() + 1,
+          from: 'bot',
+          text: `No pude conectar con la IA en este momento. ${getFallbackReply(cleanText)} Detalle: ${errorMessage}`,
+          time: currentTime(),
+        },
+      ])
+    } finally {
       setIsThinking(false)
-    }, 650)
+    }
   }
 
   return (
@@ -91,7 +164,10 @@ function App() {
             <p className="brand-name">Asistente de Admisión</p>
           </div>
         </div>
-        <div className="status-pill"><span className="status-dot" /> En línea</div>
+        <div className={`status-pill ${geminiConfigured ? 'online' : 'offline'}`}>
+          <span className="status-dot" />
+          {geminiConfigured ? 'Gemini activa' : 'Modo local'}
+        </div>
       </header>
 
       <section className="content-grid">
@@ -129,7 +205,7 @@ function App() {
             <div>{quickQuestions.map((question) => <button type="button" key={question} onClick={() => sendMessage(question)}>{question}</button>)}</div>
           </div>
 
-          <form className="composer" onSubmit={(event) => { event.preventDefault(); sendMessage() }}>
+          <form className="composer" onSubmit={(event) => { event.preventDefault(); void sendMessage() }}>
             <input value={input} onChange={(event) => setInput(event.target.value)} placeholder="Escribe tu pregunta..." aria-label="Escribe tu pregunta" />
             <button type="submit" aria-label="Enviar pregunta">↑</button>
           </form>
